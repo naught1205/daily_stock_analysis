@@ -1175,6 +1175,11 @@ class Config:
     report_type: str = "simple"
     report_language: str = "zh"
 
+    # 报告输出繁体中文（可选，默认关闭）：推送/保存前将简体转换为繁体
+    report_traditional_zh: bool = False
+    # 繁体变体：hk(香港，默认) / tw / twp(台湾惯用词) / s2t(通用繁体)
+    report_traditional_variant: str = "hk"
+
     # 仅分析结果摘要：true 时只推送汇总，不含个股详情（Issue #262）
     report_summary_only: bool = False
     report_show_llm_model: bool = True
@@ -2162,6 +2167,8 @@ class Config:
             single_stock_notify=os.getenv('SINGLE_STOCK_NOTIFY', 'false').lower() == 'true',
             report_type=cls._parse_report_type(os.getenv('REPORT_TYPE', 'simple')),
             report_language=cls._parse_report_language(report_language_raw),
+            report_traditional_zh=os.getenv('REPORT_TRADITIONAL_ZH', 'false').lower() == 'true',
+            report_traditional_variant=(os.getenv('REPORT_TRADITIONAL_VARIANT', 'hk') or 'hk').strip().lower(),
             report_summary_only=os.getenv('REPORT_SUMMARY_ONLY', 'false').lower() == 'true',
             report_show_llm_model=report_show_llm_model,
             report_templates_dir=os.getenv('REPORT_TEMPLATES_DIR', 'templates'),

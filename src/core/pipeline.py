@@ -75,6 +75,7 @@ from src.services.daily_market_context import (
 from src.services.social_sentiment_service import SocialSentimentService
 from src.services.intelligence_service import IntelligenceService
 from src.services.market_hotspot_service import MarketHotspotService
+from src.services.traditional_chinese import apply_traditional_chinese
 from src.services.analysis_context_builder import (
     AnalysisContextBuilder,
     PipelineAnalysisArtifacts,
@@ -3791,6 +3792,7 @@ class StockAnalysisPipeline:
     ) -> Optional[str]:
         """Persist report content via local filesystem as resilient fallback."""
         try:
+            content = apply_traditional_chinese(content)
             reports_dir = cls._report_output_dir()
             reports_dir.mkdir(parents=True, exist_ok=True)
             filename = filename or cls._default_report_filename()
@@ -3822,6 +3824,8 @@ class StockAnalysisPipeline:
         try:
             logger.info("生成决策仪表盘日报...")
             report = self._generate_aggregate_report(results, report_type)
+            # 可选：静态渠道逐渠道推送前统一转换为繁体中文（REPORT_TRADITIONAL_ZH=true）
+            report = apply_traditional_chinese(report)
             
             # 跳过推送（单股推送模式 / 合并模式：报告已由 _save_local_report 保存）
             if skip_push:
@@ -3885,7 +3889,8 @@ class StockAnalysisPipeline:
                         notification_run=notification_run,
                     )
 
-                send_context = self.notifier.send_to_context(report)
+                # 可选：上下文转发前统一转换为繁体中文（REPORT_TRADITIONAL_ZH=true）
+                send_context = self.notifier.send_to_context(apply_traditional_chinese(report))
                 if send_context:
                     _record_channel_result("__context__", True)
 
@@ -3992,6 +3997,8 @@ class StockAnalysisPipeline:
                             dashboard_content = self.notifier.generate_brief_report(results)
                         else:
                             dashboard_content = self.notifier.generate_wechat_dashboard(results)
+                        # 可选：企业微信精简报告单独生成，需单独转换
+                        dashboard_content = apply_traditional_chinese(dashboard_content)
                         logger.info(f"企业微信仪表盘长度: {len(dashboard_content)} 字符")
                         logger.debug(f"企业微信推送内容:\n{dashboard_content}")
                         wechat_image_bytes = None
@@ -4097,6 +4104,8 @@ class StockAnalysisPipeline:
                                     receivers=receivers,
                                 ) -> bool:
                                     grp_report = self._generate_aggregate_report(group_results, report_type)
+                                    # 可选：分组邮件报告单独生成，需单独转换
+                                    grp_report = apply_traditional_chinese(grp_report)
                                     grp_image_bytes = None
                                     if channel.value in self.notifier._markdown_to_image_channels:
                                         group_payload = (

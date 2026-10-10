@@ -31,6 +31,7 @@ from src.notification_routing import (
     split_notification_route_channels,
 )
 from src.notification_contracts import is_feishu_static_configured
+from src.services.traditional_chinese import apply_traditional_chinese
 from src.notification_noise import (
     NotificationNoiseDecision,
     evaluate_notification_noise,
@@ -2677,6 +2678,8 @@ class NotificationService(
         Returns:
             Structured dispatch diagnostics.
         """
+        # 可选：推送前统一转换为繁体中文（REPORT_TRADITIONAL_ZH=true）
+        content = apply_traditional_chinese(content)
         context_success = self.send_to_context(content)
         if not self.should_broadcast_static_channels():
             if context_success:
@@ -2904,6 +2907,8 @@ class NotificationService(
         Returns:
             保存的文件路径
         """
+        # 可选：落盘前统一转换为繁体中文（REPORT_TRADITIONAL_ZH=true）
+        content = apply_traditional_chinese(content)
         from pathlib import Path
 
         if filename is None:
