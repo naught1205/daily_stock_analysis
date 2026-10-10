@@ -313,6 +313,12 @@ class BaseSearchProvider(ABC):
     def is_available(self) -> bool:
         """检查是否有可用的 API Key"""
         return bool(self._api_keys)
+
+    @property
+    def usage_count(self) -> int:
+        """本进程内成功调用次数（所有 Key 累计）。"""
+        with self._state_lock:
+            return sum(self._key_usage.values())
     
     def _get_next_key(self) -> Optional[str]:
         """
@@ -2694,6 +2700,22 @@ class SearchService:
     def is_available(self) -> bool:
         """检查是否有可用的搜索引擎"""
         return any(p.is_available for p in self._providers)
+
+    def get_search_call_counts(self) -> Dict[str, int]:
+        """Return per-provider successful call counts for this process.
+
+        Used by the optional report usage block (REPORT_SHOW_TOKEN_USAGE) to
+        show how many searches each provider served during the current run.
+        """
+        counts: Dict[str, int] = {}
+        for provider in self._providers:
+            try:
+                count = provider.usage_count
+            except Exception:  # pragma: no cover - defensive
+                continue
+            if count:
+                counts[provider.name] = counts.get(provider.name, 0) + count
+        return counts
 
     def _cache_key(self, query: str, max_results: int, days: int) -> str:
         """Build a cache key from query parameters."""
