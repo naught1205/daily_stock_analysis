@@ -88,6 +88,17 @@ class TestFormatTavilyUsageLine:
         line = rub.format_tavily_usage_line(usage=usage, language="zh")
         assert "不限额度" in line
 
+    def test_null_key_limit_falls_back_to_plan_limit(self):
+        usage = {"used": 66, "limit": None, "plan": "Researcher", "plan_usage": 66, "plan_limit": 1000}
+        line = rub.format_tavily_usage_line(
+            usage=usage,
+            language="zh",
+            now=datetime(2026, 10, 10),
+        )
+        assert "66/1000" in line
+        assert "剩余 934" in line
+        assert "不限额度" not in line
+
     def test_nothing_returns_empty(self):
         assert rub.format_tavily_usage_line() == ""
 
