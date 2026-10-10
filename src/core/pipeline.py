@@ -3426,7 +3426,9 @@ class StockAnalysisPipeline:
             分析结果列表
         """
         start_time = time.time()
-        
+        # 用量块（REPORT_SHOW_TOKEN_USAGE）统计窗口起点；与本进程 llm_usage 写入时钟一致（本地 naive）
+        self._usage_window_start = datetime.now()
+
         # 使用配置中的股票列表
         if stock_codes is None:
             self.config.refresh_stock_list()
@@ -4380,7 +4382,38 @@ class StockAnalysisPipeline:
         """Generate aggregate report with backward-compatible notifier fallback."""
         generator = getattr(self.notifier, "generate_aggregate_report", None)
         if callable(generator):
-            return generator(results, report_type)
-        if report_type == ReportType.BRIEF and hasattr(self.notifier, "generate_brief_report"):
-            return self.notifier.generate_brief_report(results)
-        return self.notifier.generate_dashboard_report(results)
+            report = generator(results, report_type)
+        elif report_type == ReportType.BRIEF and hasattr(self.notifier, "generate_brief_report"):
+            report = self.notifier.generate_brief_report(results)
+        else:
+            report = self.notifier.generate_dashboard_report(results)
+        return self._append_usage_block(report, results)
+
+    def _append_usage_block(self, report: str, results: List[AnalysisResult]) -> str:
+        """可选：在聚合报告末尾追加 LLM/搜索用量块（REPORT_SHOW_TOKEN_USAGE=true）。"""
+        if not report or not getattr(self.config, "report_show_token_usage", False):
+            return report
+        window_start = getattr(self, "_usage_window_start", None)
+        if window_start is None:
+            return report
+        try:
+            from src.services.report_usage_block import build_usage_block
+
+            report_language = "zh"
+            try:
+                report_language = self.notifier._get_report_language(results)
+            except Exception:
+                pass
+            block = build_usage_block(
+                config=self.config,
+                db=self.db,
+                from_dt=window_start,
+                to_dt=datetime.now(),
+                language=report_language,
+                search_service=getattr(self, "search_service", None),
+            )
+            if block:
+                return report + block
+        except Exception as exc:
+            logger.warning("生成报告用量块失败: %s", exc)
+        return report

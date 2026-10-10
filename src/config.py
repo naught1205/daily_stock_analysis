@@ -1145,6 +1145,8 @@ class Config:
     discord_main_channel_id: Optional[str] = None  # Discord 主频道 ID
     discord_webhook_url: Optional[str] = None  # Discord Webhook URL
     discord_interactions_public_key: Optional[str] = None  # Discord Interaction 入站验签公钥
+    discord_webhook_username: Optional[str] = None  # 可选：Webhook 消息显示名称覆盖（默认 A股分析机器人）
+    discord_webhook_avatar_url: Optional[str] = None  # 可选：Webhook 消息头像 URL 覆盖；留空不带头像
 
     # Slack 通知配置
     slack_webhook_url: Optional[str] = None  # Slack Incoming Webhook URL
@@ -1179,6 +1181,11 @@ class Config:
     report_traditional_zh: bool = False
     # 繁体变体：hk(香港，默认) / tw / twp(台湾惯用词) / s2t(通用繁体)
     report_traditional_variant: str = "hk"
+
+    # 报告末尾用量块（可选，默认关闭）：LLM token 用量/成本估算 + 搜索 API 用量（如 Tavily）
+    report_show_token_usage: bool = False
+    llm_price_input_per_1m: float = 0.0   # 每 1M 输入 token 单价（用于成本估算，0 = 不显示成本）
+    llm_price_output_per_1m: float = 0.0  # 每 1M 输出 token 单价（用于成本估算，0 = 不显示成本）
 
     # 仅分析结果摘要：true 时只推送汇总，不含个股详情（Issue #262）
     report_summary_only: bool = False
@@ -2131,6 +2138,8 @@ class Config:
             ),
             discord_webhook_url=os.getenv('DISCORD_WEBHOOK_URL'),
             discord_interactions_public_key=os.getenv('DISCORD_INTERACTIONS_PUBLIC_KEY'),
+            discord_webhook_username=(os.getenv('DISCORD_WEBHOOK_USERNAME') or '').strip() or None,
+            discord_webhook_avatar_url=(os.getenv('DISCORD_WEBHOOK_AVATAR_URL') or '').strip() or None,
             slack_webhook_url=os.getenv('SLACK_WEBHOOK_URL'),
             slack_bot_token=os.getenv('SLACK_BOT_TOKEN'),
             slack_channel_id=os.getenv('SLACK_CHANNEL_ID'),
@@ -2169,6 +2178,15 @@ class Config:
             report_language=cls._parse_report_language(report_language_raw),
             report_traditional_zh=os.getenv('REPORT_TRADITIONAL_ZH', 'false').lower() == 'true',
             report_traditional_variant=(os.getenv('REPORT_TRADITIONAL_VARIANT', 'hk') or 'hk').strip().lower(),
+            report_show_token_usage=os.getenv('REPORT_SHOW_TOKEN_USAGE', 'false').lower() == 'true',
+            llm_price_input_per_1m=parse_env_float(
+                os.getenv('LLM_PRICE_INPUT_PER_1M'), 0.0,
+                field_name='LLM_PRICE_INPUT_PER_1M', minimum=0.0,
+            ),
+            llm_price_output_per_1m=parse_env_float(
+                os.getenv('LLM_PRICE_OUTPUT_PER_1M'), 0.0,
+                field_name='LLM_PRICE_OUTPUT_PER_1M', minimum=0.0,
+            ),
             report_summary_only=os.getenv('REPORT_SUMMARY_ONLY', 'false').lower() == 'true',
             report_show_llm_model=report_show_llm_model,
             report_templates_dir=os.getenv('REPORT_TEMPLATES_DIR', 'templates'),

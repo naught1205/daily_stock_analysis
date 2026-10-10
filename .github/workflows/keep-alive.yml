@@ -1,0 +1,46 @@
+name: 保活检查
+
+# 每月 1 日刷新所有排程工作流的启用状态，重置 GitHub 的「60 天无仓库活动自动禁用」
+# 计时（调用 enable API 可刷新计时），并向 Discord 发送心跳消息。
+# 需要仓库 Secret: KEEPALIVE_PAT（classic PAT，勾选 workflow 权限）。
+# 如果某月未收到心跳消息，说明保活失败，请在 Actions 页面手动运行或检查 PAT。
+
+on:
+  schedule:
+    - cron: '0 2 1 * *'   # 每月 1 日 UTC 02:00 = 北京时间 10:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 刷新排程工作流（重置 60 天不活跃计时）
+        env:
+          GH_TOKEN: ${{ secrets.KEEPALIVE_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "KEEPALIVE_PAT secret is not configured" >&2
+            exit 1
+          fi
+          gh api "repos/${{ github.repository }}/actions/workflows" --paginate --jq '.workflows[].id' | while read -r id; do
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/${id}/enable" >/dev/null
+            echo "refreshed workflow id=${id}"
+          done
+
+      - name: Discord 心跳
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL not configured; skipping heartbeat"
+            exit 0
+          fi
+          curl -sf -H "Content-Type: application/json" \
+            -d '{"username":"My Frd","content":"✅ 保活檢查完成：排程已續期（每月 1 日自動檢查；如未收到本條訊息請檢查 Actions）"}' \
+            "$DISCORD_WEBHOOK_URL"

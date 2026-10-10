@@ -40,6 +40,8 @@ class DiscordSender:
             'bot_token': getattr(config, 'discord_bot_token', None),
             'channel_id': getattr(config, 'discord_main_channel_id', None),
             'webhook_url': getattr(config, 'discord_webhook_url', None),
+            'webhook_username': getattr(config, 'discord_webhook_username', None),
+            'webhook_avatar_url': getattr(config, 'discord_webhook_avatar_url', None),
         }
         self._discord_max_words = self._normalize_max_words(
             getattr(config, 'discord_max_words', DISCORD_MAX_CONTENT_LENGTH)
@@ -162,9 +164,11 @@ class DiscordSender:
         """
         payload = {
             'content': content,
-            'username': 'A股分析机器人',
-            'avatar_url': 'https://picsum.photos/200'
+            'username': self._discord_config.get('webhook_username') or 'A股分析机器人',
         }
+        avatar_url = (self._discord_config.get('webhook_avatar_url') or '').strip()
+        if avatar_url:
+            payload['avatar_url'] = avatar_url
 
         return self._post_discord_message(
             self._discord_config['webhook_url'],
