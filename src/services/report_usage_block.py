@@ -131,8 +131,10 @@ def format_tavily_usage_line(
         segments.append(labels["tavily_run"].format(count=int(run_calls), credits=int(run_calls)))
 
     if usage:
-        used = int(usage.get("used") or 0)
-        limit = usage.get("limit")
+        # Tavily 免费/订阅计划的 key.limit 可能为 null（key 本身不限），
+        # 此时回退到账号级 plan_usage / plan_limit（例如 Free 计划 1000/月）。
+        used = int(usage.get("used") or 0) or int(usage.get("plan_usage") or 0)
+        limit = usage.get("limit") or usage.get("plan_limit")
         if limit:
             remaining = max(0, int(limit) - used)
             segments.append(
