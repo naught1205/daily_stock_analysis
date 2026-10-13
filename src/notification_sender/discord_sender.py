@@ -7,11 +7,13 @@ Discord 发送提醒服务
 """
 import logging
 import time
+from datetime import datetime
 from typing import Optional
 
 import requests
 
 from src.config import Config
+from src.core.trading_calendar import get_effective_trading_date
 from src.formatters import (
     MIN_MAX_WORDS,
     chunk_content_by_max_words,
@@ -47,6 +49,14 @@ class DiscordSender:
             getattr(config, 'discord_max_words', DISCORD_MAX_CONTENT_LENGTH)
         )
         self._webhook_verify_ssl = getattr(config, 'webhook_verify_ssl', True)
+        self._auto_daily_channel = bool(getattr(config, 'discord_auto_daily_channel', False))
+        self._daily_channel_market = (
+            getattr(config, 'discord_daily_channel_market', 'us') or 'us'
+        ).strip().lower()
+        self._daily_channel_category_id = (
+            getattr(config, 'discord_daily_channel_category_id', None) or ''
+        ).strip() or None
+        self._daily_channel_cache: Optional[str] = None
 
     @staticmethod
     def _normalize_max_words(value) -> int:
@@ -80,6 +90,26 @@ class DiscordSender:
 
         # 分割内容，避免单条消息超过 Discord 限制
         chunks = self._split_discord_content(sanitized_content)
+
+        # 可选：自动日频道模式（Bot 创建/复用按最近的已完成交易日命名的频道并发送）
+        if (
+            self._auto_daily_channel
+            and self._discord_config.get('bot_token')
+            and (self._discord_config.get('channel_id') or self._discord_config.get('webhook_url'))
+        ):
+            daily_channel_id = self._resolve_daily_channel_id()
+            if daily_channel_id:
+                return self._send_discord_chunks(
+                    chunks,
+                    lambda chunk, timeout_seconds=None: self._send_discord_bot(
+                        chunk,
+                        timeout_seconds=timeout_seconds,
+                        channel_id=daily_channel_id,
+                    ),
+                    "Bot(daily)",
+                    timeout_seconds=timeout_seconds,
+                )
+            logger.warning("自动日频道不可用，回退默认推送通道")
 
         # 优先使用 Webhook（配置简单，权限低）
         if self._discord_config['webhook_url']:
@@ -179,7 +209,13 @@ class DiscordSender:
             channel_name="Webhook",
         )
     
-    def _send_discord_bot(self, content: str, *, timeout_seconds: Optional[float] = None) -> bool:
+    def _send_discord_bot(
+        self,
+        content: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+        channel_id: Optional[str] = None,
+    ) -> bool:
         """
         使用 Bot API 发送消息到 Discord
         
@@ -189,12 +225,16 @@ class DiscordSender:
         Returns:
             是否发送成功
         """
+        target_channel_id = channel_id or self._discord_config["channel_id"]
+        if not target_channel_id:
+            logger.warning("Discord Bot 缺少频道 ID，跳过推送")
+            return False
         headers = {
             'Authorization': f'Bot {self._discord_config["bot_token"]}',
             'Content-Type': 'application/json'
         }
         payload = {'content': content}
-        url = f'https://discord.com/api/v10/channels/{self._discord_config["channel_id"]}/messages'
+        url = f'https://discord.com/api/v10/channels/{target_channel_id}/messages'
 
         return self._post_discord_message(
             url,
@@ -204,6 +244,147 @@ class DiscordSender:
             timeout_seconds=timeout_seconds,
             channel_name="Bot",
         )
+
+    def _daily_channel_name(self, *, current_time: Optional[datetime] = None) -> str:
+        """按最近的已完成交易日（market 配置）生成频道名 YYYY-MM-DD。"""
+        try:
+            return get_effective_trading_date(self._daily_channel_market, current_time=current_time).isoformat()
+        except Exception as exc:
+            logger.warning("推导交易日日期失败，回退自然日: %s", exc)
+            return (current_time or datetime.now()).strftime("%Y-%m-%d")
+
+    def _webhook_channel_id(self) -> Optional[str]:
+        """从配置的 Webhook URL 解析绑定频道 ID（无需鉴权）。"""
+        webhook_url = (self._discord_config.get('webhook_url') or '').strip()
+        marker = '/api/webhooks/'
+        if marker not in webhook_url:
+            return None
+        webhook_id = webhook_url.split(marker, 1)[1].split('/', 1)[0].strip()
+        if not webhook_id:
+            return None
+        data = self._discord_bot_request(
+            "GET",
+            f"/webhooks/{webhook_id}",
+            auth=False,
+            channel_name="WebhookInfo",
+        )
+        if isinstance(data, dict):
+            return data.get("channel_id")
+        return None
+
+    def _resolve_guild_id(self) -> Optional[str]:
+        """解析 Bot 所在服务器 ID：优先 Bot 频道，其次 Webhook 绑定频道。"""
+        channel_id = self._discord_config.get('channel_id') or self._webhook_channel_id()
+        if not channel_id:
+            return None
+        data = self._discord_bot_request(
+            "GET",
+            f"/channels/{channel_id}",
+            channel_name="ChannelInfo",
+        )
+        if isinstance(data, dict):
+            return data.get("guild_id")
+        return None
+
+    def _resolve_daily_channel_id(self) -> Optional[str]:
+        """查找或创建「YYYY-MM-DD」文本频道；失败返回 None（调用方回退）。"""
+        if self._daily_channel_cache:
+            return self._daily_channel_cache
+
+        guild_id = self._resolve_guild_id()
+        if not guild_id:
+            logger.warning("自动日频道：无法解析服务器 ID")
+            return None
+
+        channel_name = self._daily_channel_name()
+        channels = self._discord_bot_request(
+            "GET",
+            f"/guilds/{guild_id}/channels",
+            channel_name="GuildChannels",
+        )
+        if isinstance(channels, list):
+            for channel in channels:
+                if channel.get("type") == 0 and channel.get("name") == channel_name:
+                    self._daily_channel_cache = channel.get("id")
+                    return self._daily_channel_cache
+
+        payload = {"name": channel_name, "type": 0}
+        if self._daily_channel_category_id:
+            payload["parent_id"] = self._daily_channel_category_id
+        created = self._discord_bot_request(
+            "POST",
+            f"/guilds/{guild_id}/channels",
+            payload=payload,
+            channel_name="CreateChannel",
+        )
+        if isinstance(created, dict) and created.get("id"):
+            logger.info("自动日频道已创建: %s (%s)", channel_name, created.get("id"))
+            self._daily_channel_cache = created.get("id")
+            return self._daily_channel_cache
+
+        logger.warning("自动日频道创建失败: %s", channel_name)
+        return None
+
+    def _discord_bot_request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[dict] = None,
+        *,
+        auth: bool = True,
+        timeout_seconds: Optional[float] = None,
+        channel_name: str = "Bot API",
+    ):
+        """调用 Discord Bot API（有限重试）；失败返回 None，不抛出。"""
+        url = f"https://discord.com/api/v10{path}"
+        headers = {'Content-Type': 'application/json'}
+        if auth:
+            bot_token = self._discord_config.get('bot_token')
+            if not bot_token:
+                return None
+            headers['Authorization'] = f'Bot {bot_token}'
+
+        request_kwargs = {
+            'headers': headers,
+            'timeout': timeout_seconds or 10,
+        }
+        if payload is not None:
+            request_kwargs['json'] = payload
+
+        for attempt in range(1, DISCORD_MAX_RETRIES + 1):
+            try:
+                response = requests.request(method, url, **request_kwargs)
+            except requests.exceptions.RequestException as e:
+                if attempt < DISCORD_MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                logger.error("Discord %s 请求异常: %s", channel_name, e)
+                return None
+
+            if 200 <= response.status_code < 300:
+                if not getattr(response, 'content', b''):
+                    return {}
+                try:
+                    return response.json()
+                except ValueError:
+                    return {}
+
+            if response.status_code == 429 and attempt < DISCORD_MAX_RETRIES:
+                time.sleep(self._get_retry_after_seconds(response, attempt))
+                continue
+            if response.status_code >= 500 and attempt < DISCORD_MAX_RETRIES:
+                time.sleep(2 ** attempt)
+                continue
+
+            logger.error(
+                "Discord %s 调用失败: %s %s",
+                channel_name,
+                response.status_code,
+                getattr(response, 'text', ''),
+            )
+            return None
+
+        return None
 
     def _post_discord_message(
         self,
