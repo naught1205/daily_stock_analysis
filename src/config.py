@@ -1147,6 +1147,10 @@ class Config:
     discord_interactions_public_key: Optional[str] = None  # Discord Interaction 入站验签公钥
     discord_webhook_username: Optional[str] = None  # 可选：Webhook 消息显示名称覆盖（默认 A股分析机器人）
     discord_webhook_avatar_url: Optional[str] = None  # 可选：Webhook 消息头像 URL 覆盖；留空不带头像
+    # 可选：自动创建/复用按交易日命名的频道（YYYY-MM-DD），报告发送到该频道（需 Bot Token）
+    discord_auto_daily_channel: bool = False
+    discord_daily_channel_market: str = "us"  # 用于推导交易日期的市场（cn/hk/us/...）
+    discord_daily_channel_category_id: Optional[str] = None  # 可选：新频道所属分类 ID
 
     # Slack 通知配置
     slack_webhook_url: Optional[str] = None  # Slack Incoming Webhook URL
@@ -2140,6 +2144,9 @@ class Config:
             discord_interactions_public_key=os.getenv('DISCORD_INTERACTIONS_PUBLIC_KEY'),
             discord_webhook_username=(os.getenv('DISCORD_WEBHOOK_USERNAME') or '').strip() or None,
             discord_webhook_avatar_url=(os.getenv('DISCORD_WEBHOOK_AVATAR_URL') or '').strip() or None,
+            discord_auto_daily_channel=os.getenv('DISCORD_AUTO_DAILY_CHANNEL', 'false').lower() == 'true',
+            discord_daily_channel_market=(os.getenv('DISCORD_DAILY_CHANNEL_MARKET', 'us') or 'us').strip().lower(),
+            discord_daily_channel_category_id=(os.getenv('DISCORD_DAILY_CHANNEL_CATEGORY_ID') or '').strip() or None,
             slack_webhook_url=os.getenv('SLACK_WEBHOOK_URL'),
             slack_bot_token=os.getenv('SLACK_BOT_TOKEN'),
             slack_channel_id=os.getenv('SLACK_CHANNEL_ID'),
