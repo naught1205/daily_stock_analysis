@@ -4391,22 +4391,26 @@ class StockAnalysisPipeline:
 
     def _append_usage_block(self, report: str, results: List[AnalysisResult]) -> str:
         """可选：在聚合报告末尾追加 LLM/搜索用量块（REPORT_SHOW_TOKEN_USAGE=true）。"""
-        if not report or not getattr(self.config, "report_show_token_usage", False):
+        config = getattr(self, "config", None)
+        if not report or config is None or not getattr(config, "report_show_token_usage", False):
             return report
         window_start = getattr(self, "_usage_window_start", None)
-        if window_start is None:
+        db = getattr(self, "db", None)
+        if window_start is None or db is None:
             return report
         try:
             from src.services.report_usage_block import build_usage_block
 
             report_language = "zh"
-            try:
-                report_language = self.notifier._get_report_language(results)
-            except Exception:
-                pass
+            notifier = getattr(self, "notifier", None)
+            if notifier is not None:
+                try:
+                    report_language = notifier._get_report_language(results)
+                except Exception:
+                    pass
             block = build_usage_block(
-                config=self.config,
-                db=self.db,
+                config=config,
+                db=db,
                 from_dt=window_start,
                 to_dt=datetime.now(),
                 language=report_language,
