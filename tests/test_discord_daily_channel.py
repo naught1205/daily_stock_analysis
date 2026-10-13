@@ -115,3 +115,15 @@ class TestDailyChannel:
 
         mock_api.assert_not_called()
         assert "webhooks/999/tok" in mock_post.call_args[0][0]
+
+    def test_webhook_channel_id_uses_token_endpoint_without_auth(self):
+        calls = []
+
+        def fake_api(self, method, path, payload=None, **kwargs):
+            calls.append((method, path, kwargs.get("auth")))
+            return {"channel_id": "555"}
+
+        sender = DiscordSender(_config())
+        with mock.patch.object(DiscordSender, "_discord_bot_request", fake_api):
+            assert sender._webhook_channel_id() == "555"
+        assert calls == [("GET", "/webhooks/999/tok", False)]

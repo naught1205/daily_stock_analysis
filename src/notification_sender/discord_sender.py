@@ -253,37 +253,64 @@ class DiscordSender:
             logger.warning("推导交易日日期失败，回退自然日: %s", exc)
             return (current_time or datetime.now()).strftime("%Y-%m-%d")
 
-    def _webhook_channel_id(self) -> Optional[str]:
-        """从配置的 Webhook URL 解析绑定频道 ID（无需鉴权）。"""
+    def _webhook_info(self) -> Optional[dict]:
+        """通过 URL 内嵌 token 的公开端点获取 Webhook 对象（含 channel_id/guild_id）。
+
+        Discord 对不带 token 的 GET /webhooks/{id} 会返回 401，因此必须使用
+        GET /webhooks/{id}/{token}。
+        """
         webhook_url = (self._discord_config.get('webhook_url') or '').strip()
         marker = '/api/webhooks/'
         if marker not in webhook_url:
             return None
-        webhook_id = webhook_url.split(marker, 1)[1].split('/', 1)[0].strip()
-        if not webhook_id:
+        remainder = webhook_url.split(marker, 1)[1].strip('/')
+        parts = [part for part in remainder.split('/') if part]
+        if not parts:
             return None
+        webhook_id = parts[0]
+        webhook_token = parts[1] if len(parts) > 1 else None
+        if webhook_token:
+            path = f"/webhooks/{webhook_id}/{webhook_token}"
+        else:
+            path = f"/webhooks/{webhook_id}"
         data = self._discord_bot_request(
             "GET",
-            f"/webhooks/{webhook_id}",
+            path,
             auth=False,
             channel_name="WebhookInfo",
         )
-        if isinstance(data, dict):
-            return data.get("channel_id")
-        return None
+        return data if isinstance(data, dict) else None
+
+    def _webhook_channel_id(self) -> Optional[str]:
+        """从配置的 Webhook 解析绑定频道 ID。"""
+        webhook = self._webhook_info()
+        return webhook.get("channel_id") if webhook else None
 
     def _resolve_guild_id(self) -> Optional[str]:
-        """解析 Bot 所在服务器 ID：优先 Bot 频道，其次 Webhook 绑定频道。"""
-        channel_id = self._discord_config.get('channel_id') or self._webhook_channel_id()
-        if not channel_id:
-            return None
-        data = self._discord_bot_request(
-            "GET",
-            f"/channels/{channel_id}",
-            channel_name="ChannelInfo",
-        )
-        if isinstance(data, dict):
-            return data.get("guild_id")
+        """解析 Bot 所在服务器 ID：优先显式频道，其次 Webhook 对象自带 guild_id。"""
+        channel_id = self._discord_config.get('channel_id')
+        if channel_id:
+            data = self._discord_bot_request(
+                "GET",
+                f"/channels/{channel_id}",
+                channel_name="ChannelInfo",
+            )
+            if isinstance(data, dict) and data.get("guild_id"):
+                return data.get("guild_id")
+
+        webhook = self._webhook_info()
+        if webhook:
+            if webhook.get("guild_id"):
+                return webhook.get("guild_id")
+            webhook_channel_id = webhook.get("channel_id")
+            if webhook_channel_id:
+                data = self._discord_bot_request(
+                    "GET",
+                    f"/channels/{webhook_channel_id}",
+                    channel_name="ChannelInfo",
+                )
+                if isinstance(data, dict):
+                    return data.get("guild_id")
         return None
 
     def _resolve_daily_channel_id(self) -> Optional[str]:
