@@ -1,0 +1,11 @@
+name = "dsa-discord-bridge"
+main = "index.js"
+compatibility_date = "2026-10-01"
+
+# 工作日 UTC 10:00 = 香港时间 18:00，精确触发每日分析
+[triggers]
+crons = ["0 10 * * 1-5"]
+
+[vars]
+GITHUB_REPO = "naught1205/daily_stock_analysis"
+GITHUB_WORKFLOW = "00-daily-analysis.yml"
