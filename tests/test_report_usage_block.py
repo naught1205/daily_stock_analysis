@@ -103,6 +103,58 @@ class TestFormatTavilyUsageLine:
         assert rub.format_tavily_usage_line() == ""
 
 
+class TestFormatTavilyPoolLine:
+    def test_two_known_keys_totals_per_key_and_warning(self):
+        line = rub.format_tavily_pool_line(
+            run_calls=43,
+            usages=[
+                {"used": 950, "limit": 1000},
+                {"used": 250, "limit": 1000},
+            ],
+            language="zh",
+        )
+        assert "本次搜索 43 次" in line
+        assert "额度 1200/2000（剩 800）" in line
+        assert "950/1000" in line
+        assert "250/1000" in line
+        assert "80%" in line
+
+    def test_exhausted_marker_and_all_exhausted(self):
+        line = rub.format_tavily_pool_line(
+            usages=[
+                {"used": 1000, "limit": 1000},
+                {"used": 1000, "limit": 1000},
+            ],
+            language="zh",
+        )
+        assert "⛔已用尽" in line
+        assert "所有 Key 已用尽" in line
+
+    def test_unknown_usage_omits_totals(self):
+        line = rub.format_tavily_pool_line(
+            usages=[{"used": 5, "limit": 1000}, None],
+            language="zh",
+        )
+        assert "未知" in line
+        assert "5/1000" in line
+        assert "额度" not in line
+
+    def test_single_or_no_key_returns_empty(self):
+        assert rub.format_tavily_pool_line(usages=[{"used": 1, "limit": 1000}]) == ""
+        assert rub.format_tavily_pool_line() == ""
+
+    def test_english_labels(self):
+        line = rub.format_tavily_pool_line(
+            usages=[
+                {"used": 950, "limit": 1000},
+                {"used": 250, "limit": 1000},
+            ],
+            language="en",
+        )
+        assert "pool 1200/2000" in line
+        assert "(800 left)" in line
+
+
 class TestBuildUsageBlock:
     def test_disabled_returns_empty(self):
         block = rub.build_usage_block(
@@ -162,3 +214,27 @@ class TestBuildUsageBlock:
                 language="zh",
             )
         assert block == ""
+
+    def test_multi_key_config_uses_pool_line(self):
+        db = mock.Mock()
+        db.get_llm_usage_summary.return_value = SUMMARY
+        usage_map = {
+            "k1": {"used": 1000, "limit": 1000},
+            "k2": {"used": 10, "limit": 1000},
+        }
+        with mock.patch.object(
+            rub, "fetch_tavily_usage_many", return_value=usage_map
+        ) as mocked_many, mock.patch.object(rub, "fetch_tavily_usage") as mocked_single:
+            block = rub.build_usage_block(
+                config=_config(tavily_api_keys=["k1", "k2"]),
+                db=db,
+                from_dt=datetime(2026, 10, 10, 0, 0),
+                to_dt=datetime(2026, 10, 10, 1, 0),
+                language="zh",
+                now=datetime(2026, 10, 10),
+            )
+        assert "🔎 Tavily" in block
+        assert "⛔已用尽" in block
+        assert "10/1000" in block
+        mocked_many.assert_called_once_with(["k1", "k2"])
+        mocked_single.assert_not_called()

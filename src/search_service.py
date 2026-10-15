@@ -289,7 +289,10 @@ class SearchResponse:
 
 class BaseSearchProvider(ABC):
     """搜索引擎基类"""
-    
+
+    # 额度用尽的 Key 在本进程内跳过的时长；超过后自动重检（覆盖月度额度重置）
+    _EXHAUSTED_KEY_RECHECK_SECONDS = 6 * 3600
+
     def __init__(self, api_keys: List[str], name: str):
         """
         初始化搜索引擎
@@ -303,6 +306,7 @@ class BaseSearchProvider(ABC):
         self._key_cycle = cycle(api_keys) if api_keys else None
         self._key_usage: Dict[str, int] = {key: 0 for key in api_keys}
         self._key_errors: Dict[str, int] = {key: 0 for key in api_keys}
+        self._exhausted_keys: Dict[str, float] = {}
         self._state_lock = threading.RLock()
     
     @property
@@ -323,24 +327,57 @@ class BaseSearchProvider(ABC):
     def _get_next_key(self) -> Optional[str]:
         """
         获取下一个可用的 API Key（负载均衡）
-        
-        策略：轮询 + 跳过错误过多的 key
+
+        策略：轮询 + 跳过错误过多的 key + 跳过额度已用尽的 key
         """
         with self._state_lock:
             if not self._key_cycle:
                 return None
-            
+
+            now = time.time()
             # 最多尝试所有 key
             for _ in range(len(self._api_keys)):
                 key = next(self._key_cycle)
+                if self._is_key_exhausted(key, now):
+                    continue
                 # 跳过错误次数过多的 key（超过 3 次）
                 if self._key_errors.get(key, 0) < 3:
                     return key
-            
-            # 所有 key 都有问题，重置错误计数并返回第一个
+
+            if self._all_keys_exhausted(now):
+                logger.warning(f"[{self._name}] 所有 API Key 额度均已用尽")
+                return None
+
+            # 所有 key 都有问题，重置错误计数并返回第一个可用 key
             logger.warning(f"[{self._name}] 所有 API Key 都有错误记录，重置错误计数")
             self._key_errors = {key: 0 for key in self._api_keys}
-            return self._api_keys[0] if self._api_keys else None
+            for _ in range(len(self._api_keys)):
+                key = next(self._key_cycle)
+                if not self._is_key_exhausted(key, now):
+                    return key
+            return None
+
+    def _is_key_exhausted(self, key: str, now: Optional[float] = None) -> bool:
+        """额度标记是否仍有效；超过重检窗口后允许再次尝试该 key。"""
+        marked_at = self._exhausted_keys.get(key)
+        if marked_at is None:
+            return False
+        return (now if now is not None else time.time()) - marked_at < self._EXHAUSTED_KEY_RECHECK_SECONDS
+
+    def _all_keys_exhausted(self, now: Optional[float] = None) -> bool:
+        """是否所有 key 都处于额度用尽状态。"""
+        if not self._api_keys:
+            return False
+        return all(self._is_key_exhausted(key, now) for key in self._api_keys)
+
+    def _mark_key_exhausted(self, key: str) -> None:
+        """将 key 标记为额度用尽（本进程内跳过，超过重检窗口后自动恢复尝试）。"""
+        with self._state_lock:
+            self._exhausted_keys[key] = time.time()
+
+    def _error_indicates_exhausted(self, error_message: Optional[str]) -> bool:
+        """子类可覆盖：判断错误是否表示 key 额度/权限耗尽，应切换下一个 key。"""
+        return False
     
     def _record_success(self, key: str) -> None:
         """记录成功使用"""
@@ -371,9 +408,12 @@ class BaseSearchProvider(ABC):
         api_key: Optional[str] = None,
         **search_kwargs: Any,
     ) -> SearchResponse:
-        """Run the shared search flow with an optional preselected API key."""
-        api_key = api_key or self._get_next_key()
-        if not api_key:
+        """Run the shared search flow with optional key preselection and quota failover.
+
+        当某次搜索因额度/权限耗尽失败时，标记该 key 并自动用下一个 key 重试同一条
+        查询，保证单次运行内搜索不中断（失败调用不计 credits）。
+        """
+        if not self._api_keys:
             return SearchResponse(
                 query=query,
                 results=[],
@@ -382,32 +422,76 @@ class BaseSearchProvider(ABC):
                 error_message=f"{self._name} 未配置 API Key"
             )
 
-        start_time = time.time()
-        try:
-            response = self._do_search(query, api_key, max_results, days=days, **search_kwargs)
-            response.search_time = time.time() - start_time
+        max_attempts = len(self._api_keys)
+        current_key = api_key
+        last_response: Optional[SearchResponse] = None
+
+        for _ in range(max_attempts):
+            current_key = current_key or self._get_next_key()
+            if not current_key:
+                break
+
+            start_time = time.time()
+            try:
+                response = self._do_search(query, current_key, max_results, days=days, **search_kwargs)
+                response.search_time = time.time() - start_time
+            except Exception as e:
+                self._record_error(current_key)
+                elapsed = time.time() - start_time
+                logger.error(f"[{self._name}] 搜索 '{query}' 失败: {e}")
+                response = SearchResponse(
+                    query=query,
+                    results=[],
+                    provider=self._name,
+                    success=False,
+                    error_message=str(e),
+                    search_time=elapsed
+                )
 
             if response.success:
                 response.mark_retrieved()
-                self._record_success(api_key)
+                self._record_success(current_key)
                 logger.info(f"[{self._name}] 搜索 '{query}' 成功，返回 {len(response.results)} 条结果，耗时 {response.search_time:.2f}s")
-            else:
-                self._record_error(api_key)
+                return response
 
-            return response
+            self._record_error(current_key)
+            last_response = response
 
-        except Exception as e:
-            self._record_error(api_key)
-            elapsed = time.time() - start_time
-            logger.error(f"[{self._name}] 搜索 '{query}' 失败: {e}")
+            if not self._error_indicates_exhausted(response.error_message):
+                return response
+
+            self._mark_key_exhausted(current_key)
+            logger.warning(
+                f"[{self._name}] API Key {current_key[:8]}... 额度已用尽，尝试切换下一个 Key"
+            )
+            current_key = None
+
+        if last_response is not None and self._all_keys_exhausted():
             return SearchResponse(
                 query=query,
                 results=[],
                 provider=self._name,
                 success=False,
-                error_message=str(e),
-                search_time=elapsed
+                error_message=f"{self._name} 所有 API Key 本月额度已用尽",
+                search_time=last_response.search_time
             )
+        if last_response is not None:
+            return last_response
+        if self._all_keys_exhausted():
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._name,
+                success=False,
+                error_message=f"{self._name} 所有 API Key 本月额度已用尽"
+            )
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider=self._name,
+            success=False,
+            error_message=f"{self._name} 未配置可用 API Key"
+        )
 
     def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
         """
@@ -438,6 +522,69 @@ class TavilySearchProvider(BaseSearchProvider):
     
     def __init__(self, api_keys: List[str]):
         super().__init__(api_keys, "Tavily")
+        self._apply_usage_based_key_order()
+
+    # 额度/权限耗尽类错误的特征（异常类名或错误文案），命中后切换下一个 Key
+    _EXHAUSTED_ERROR_TYPES = (
+        "UsageLimitExceededError",
+        "ForbiddenError",
+        "InvalidAPIKeyError",
+        "TavilyKeylessLimitError",
+    )
+    _EXHAUSTED_ERROR_KEYWORDS = (
+        "rate limit",
+        "quota",
+        "usage limit",
+        "plan limit",
+        "exceeded",
+        "forbidden",
+        "invalid api key",
+        "credits",
+    )
+
+    def _error_indicates_exhausted(self, error_message: Optional[str]) -> bool:
+        message = (error_message or "").strip()
+        if not message:
+            return False
+        lowered = message.lower()
+        if any(error_type.lower() in lowered for error_type in self._EXHAUSTED_ERROR_TYPES):
+            return True
+        return any(keyword in lowered for keyword in self._EXHAUSTED_ERROR_KEYWORDS)
+
+    def _apply_usage_based_key_order(self) -> None:
+        """按剩余额度重排 Key：优先使用尚有额度的 Key，已用尽的排到最后。
+
+        查询失败（fail-open）时保持配置顺序；单 Key 时不发起查询。
+        """
+        keys = [key for key in self._api_keys if key]
+        if len(keys) < 2:
+            return
+        try:
+            from src.services.search_usage import (
+                fetch_tavily_usage_many,
+                remaining_credits,
+                select_tavily_key_order,
+            )
+
+            usage_by_key = fetch_tavily_usage_many(keys)
+            ordered = select_tavily_key_order(keys, usage_by_key)
+        except Exception as exc:
+            logger.warning(f"[Tavily] 额度查询失败，按配置顺序使用 API Key: {exc}")
+            return
+
+        if ordered and ordered != keys:
+            with self._state_lock:
+                self._api_keys = ordered
+                self._key_cycle = cycle(ordered)
+                self._key_usage = {key: 0 for key in ordered}
+                self._key_errors = {key: 0 for key in ordered}
+
+        parts = []
+        for index, key in enumerate(ordered):
+            remaining = remaining_credits(usage_by_key.get(key))
+            remaining_text = remaining if remaining is not None else "未知"
+            parts.append(f"#{index + 1} {key[:8]}...（剩 {remaining_text}）")
+        logger.info(f"[Tavily] API Key 顺序（按剩余额度）: {'、'.join(parts)}")
     
     def _do_search(
         self,
@@ -502,6 +649,9 @@ class TavilySearchProvider(BaseSearchProvider):
             
         except Exception as e:
             error_msg = str(e)
+            # 额度/权限耗尽类异常保留类名，便于 failover 判定（429/432/403/401）
+            if type(e).__name__ in self._EXHAUSTED_ERROR_TYPES:
+                error_msg = f"{type(e).__name__}: {error_msg}"
             # 检查是否是配额问题
             if 'rate limit' in error_msg.lower() or 'quota' in error_msg.lower():
                 error_msg = f"API 配额已用尽: {error_msg}"
@@ -524,43 +674,7 @@ class TavilySearchProvider(BaseSearchProvider):
         """执行 Tavily 搜索，可按调用方选择是否启用新闻 topic。"""
         if topic is None:
             return super().search(query, max_results=max_results, days=days)
-
-        api_key = self._get_next_key()
-        if not api_key:
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self._name,
-                success=False,
-                error_message=f"{self._name} 未配置 API Key"
-            )
-
-        start_time = time.time()
-        try:
-            response = self._do_search(query, api_key, max_results, days=days, topic=topic)
-            response.search_time = time.time() - start_time
-
-            if response.success:
-                response.mark_retrieved()
-                self._record_success(api_key)
-                logger.info(f"[{self._name}] 搜索 '{query}' 成功，返回 {len(response.results)} 条结果，耗时 {response.search_time:.2f}s")
-            else:
-                self._record_error(api_key)
-
-            return response
-
-        except Exception as e:
-            self._record_error(api_key)
-            elapsed = time.time() - start_time
-            logger.error(f"[{self._name}] 搜索 '{query}' 失败: {e}")
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self._name,
-                success=False,
-                error_message=str(e),
-                search_time=elapsed
-            )
+        return self._execute_search(query, max_results=max_results, days=days, topic=topic)
     
     @staticmethod
     def _extract_domain(url: str) -> str:

@@ -123,12 +123,12 @@ async function handleInteraction(request, env) {
     const symbolOption = options.find((opt) => opt.name === "symbol");
     const symbol = (symbolOption?.value || "").trim().toUpperCase();
     if (!symbol) {
-      return ephemeral("请提供股票代码，例如 `/analyze NVDA`。");
+      return ephemeral("請提供股票代碼，例如 `/analyze NVDA`。");
     }
     return interactionResponse({
       type: 4,
       data: {
-        content: `要生成 **${symbol}** 的分析报告吗？`,
+        content: `要生成 **${symbol}** 的分析報告嗎？`,
         flags: 64,
         components: [
           {
@@ -151,11 +151,11 @@ async function handleInteraction(request, env) {
       try {
         await dispatchWorkflow(env, { mode: "stocks-only", stocks: symbol });
         return updateMessage(
-          `🚀 已开始生成 **${symbol}** 的分析报告，完成后会推送到当日频道。`,
+          `🚀 已開始生成 **${symbol}** 的分析報告，完成後會推送到當日頻道。`,
         );
       } catch (err) {
         console.error(err);
-        return updateMessage(`⚠️ 触发失败：${String(err.message || err)}`);
+        return updateMessage(`⚠️ 觸發失敗：${String(err.message || err)}`);
       }
     }
     if (customId === "analyze_no") {
@@ -163,7 +163,7 @@ async function handleInteraction(request, env) {
     }
   }
 
-  return ephemeral("暂不支持该交互。");
+  return ephemeral("暫不支援該互動。");
 }
 
 export default {
@@ -183,7 +183,7 @@ export default {
     ctx.waitUntil(
       dispatchWorkflow(env, { mode: "full" }).catch(async (err) => {
         console.error("cron dispatch failed", err);
-        await alertDiscord(env, `⚠️ 定时触发失败：${String(err.message || err)}`);
+        await alertDiscord(env, `⚠️ 定時觸發失敗：${String(err.message || err)}`);
       }),
     );
   },

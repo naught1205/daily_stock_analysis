@@ -6,7 +6,8 @@
 
 当 REPORT_SHOW_TOKEN_USAGE=true 时，在主聚合报告末尾追加：
 1. LLM token 用量 / 调用次数 / 模型 / 成本估算（LLM_PRICE_* 配置）
-2. 搜索 API 用量（当前支持 Tavily：本次搜索次数 + 本期 credits 余额）
+2. 搜索 API 用量（当前支持 Tavily：本次搜索次数 + 本期 credits 余额；
+   配置多个 Key 时展示整个 Key 池的额度状态）
 
 所有查询均 fail-open：任何异常只记录日志，不影响报告主流程。
 """
@@ -16,9 +17,9 @@ from __future__ import annotations
 import calendar
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from src.services.search_usage import fetch_tavily_usage
+from src.services.search_usage import fetch_tavily_usage, fetch_tavily_usage_many
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,11 @@ _USAGE_LABELS: Dict[str, Dict[str, str]] = {
         "tavily_plan": "方案：{plan}",
         "tavily_projected": "月底估算约 {projected}/{limit}",
         "tavily_warn": "⚠️ 已用超过 80%",
+        "tavily_pool_total": "额度 {used}/{limit}（剩 {remaining}）",
+        "tavily_key_sep": " ｜ ",
+        "tavily_key_exhausted": "⛔已用尽",
+        "tavily_key_unknown": "未知",
+        "tavily_all_exhausted": "所有 Key 已用尽",
     },
     "en": {
         "llm_heading": "Usage",
@@ -52,6 +58,11 @@ _USAGE_LABELS: Dict[str, Dict[str, str]] = {
         "tavily_plan": "plan: {plan}",
         "tavily_projected": "month-end est. ~{projected}/{limit}",
         "tavily_warn": "⚠️ over 80% used",
+        "tavily_pool_total": "pool {used}/{limit} ({remaining} left)",
+        "tavily_key_sep": " | ",
+        "tavily_key_exhausted": "⛔ exhausted",
+        "tavily_key_unknown": "?",
+        "tavily_all_exhausted": "all keys exhausted",
     },
     "ko": {
         "llm_heading": "사용량",
@@ -67,6 +78,11 @@ _USAGE_LABELS: Dict[str, Dict[str, str]] = {
         "tavily_plan": "플랜: {plan}",
         "tavily_projected": "월말 예상 ~{projected}/{limit}",
         "tavily_warn": "⚠️ 80% 초과",
+        "tavily_pool_total": "풀 {used}/{limit}(잔여 {remaining})",
+        "tavily_key_sep": " | ",
+        "tavily_key_exhausted": "⛔ 소진",
+        "tavily_key_unknown": "?",
+        "tavily_all_exhausted": "모든 키 소진",
     },
 }
 
@@ -160,6 +176,74 @@ def format_tavily_usage_line(
     return "🔎 Tavily：" + " · ".join(segments)
 
 
+def format_tavily_pool_line(
+    *,
+    run_calls: Optional[int] = None,
+    usages: Optional[List[Optional[Dict[str, Any]]]] = None,
+    language: str = "zh",
+    now: Optional[datetime] = None,
+) -> str:
+    """Format the multi-key Tavily pool line; empty when fewer than 2 keys."""
+    pool = list(usages or [])
+    if len(pool) < 2:
+        return ""
+
+    labels = _labels(language)
+    segments = []
+
+    if run_calls:
+        segments.append(labels["tavily_run"].format(count=int(run_calls), credits=int(run_calls)))
+
+    key_parts = []
+    used_total = 0
+    limit_total = 0
+    totals_complete = True
+    known_count = 0
+    exhausted_count = 0
+    warn = False
+
+    for usage in pool:
+        used = None
+        limit = None
+        if usage:
+            used = usage.get("used") or usage.get("plan_usage") or 0
+            limit = usage.get("limit") or usage.get("plan_limit")
+        if limit:
+            used = int(used or 0)
+            limit = int(limit)
+            known_count += 1
+            used_total += used
+            limit_total += limit
+            if used >= limit:
+                exhausted_count += 1
+                key_parts.append(labels["tavily_key_exhausted"])
+            else:
+                if used / limit >= 0.8:
+                    warn = True
+                key_parts.append(f"{used}/{limit}")
+        else:
+            totals_complete = False
+            key_parts.append(labels["tavily_key_unknown"])
+
+    if known_count and totals_complete:
+        segments.append(
+            labels["tavily_pool_total"].format(
+                used=used_total,
+                limit=limit_total,
+                remaining=max(0, limit_total - used_total),
+            )
+        )
+
+    segments.append(labels["tavily_key_sep"].join(key_parts))
+
+    if known_count == len(pool) and exhausted_count == len(pool):
+        segments.append(labels["tavily_all_exhausted"])
+    elif warn:
+        segments.append(labels["tavily_warn"])
+
+    return "🔎 Tavily：" + " · ".join(segments)
+
+
 def build_usage_block(
     *,
     config: Any,
@@ -197,13 +281,26 @@ def build_usage_block(
             run_calls = search_service.get_search_call_counts().get("Tavily")
         except Exception as exc:
             logger.debug("读取搜索调用次数失败: %s", exc)
-    usage = fetch_tavily_usage(tavily_keys[0]) if tavily_keys else None
-    tavily_line = format_tavily_usage_line(
-        run_calls=run_calls,
-        usage=usage,
-        language=language,
-        now=now,
-    )
+    if len(tavily_keys) > 1:
+        usage_map = None
+        try:
+            usage_map = fetch_tavily_usage_many(tavily_keys)
+        except Exception as exc:
+            logger.warning("Tavily 多 Key 用量查询失败: %s", exc)
+        tavily_line = format_tavily_pool_line(
+            run_calls=run_calls,
+            usages=[(usage_map or {}).get(key) for key in tavily_keys],
+            language=language,
+            now=now,
+        )
+    else:
+        usage = fetch_tavily_usage(tavily_keys[0]) if tavily_keys else None
+        tavily_line = format_tavily_usage_line(
+            run_calls=run_calls,
+            usage=usage,
+            language=language,
+            now=now,
+        )
     if tavily_line:
         lines.append(tavily_line)
 
