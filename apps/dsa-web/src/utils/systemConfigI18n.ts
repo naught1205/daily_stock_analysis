@@ -221,7 +221,7 @@ const fieldDescriptionMap: Record<string, string> = {
   STOCK_LIST: '推荐使用英文逗号分隔股票代码；中文逗号、顿号、分号、空格和换行会在保存后规范为英文逗号。',
   TUSHARE_TOKEN: '用于接入 Tushare Pro 数据服务的凭据。',
   BOCHA_API_KEYS: '用于新闻检索的 Bocha 密钥，支持逗号分隔多个（最高优先级）。',
-  TAVILY_API_KEYS: '用于新闻检索的 Tavily 密钥，支持逗号分隔多个。',
+  TAVILY_API_KEYS: '用于新闻检索的 Tavily 密钥，支持逗号分隔多个；当前 Key 月度额度用尽时，自动切换到下一个 Key。',
   ANSPIRE_API_KEYS: 'Anspire Open 密钥，支持逗号分隔多个；默认同时用于大模型网关和新闻检索。',
   SERPAPI_API_KEYS: '用于新闻检索的 SerpAPI 密钥，支持逗号分隔多个。',
   BRAVE_API_KEYS: '用于新闻检索的 Brave Search 密钥，支持逗号分隔多个。',

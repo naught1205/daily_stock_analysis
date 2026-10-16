@@ -1090,7 +1090,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "TAVILY_API_KEYS": {
         "title": "Tavily API Keys",
-        "description": "Comma-separated Tavily API keys.",
+        "description": "Comma-separated Tavily API keys; keys are used in order and rotated automatically when the active key runs out of monthly credits.",
         "category": "data_source",
         "data_type": "string",
         "ui_control": "password",

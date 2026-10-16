@@ -60,3 +60,66 @@ class TestFetchTavilyUsage:
         result = su.fetch_tavily_usage("k")
         assert result["limit"] is None
         assert result["used"] == 5
+
+
+class TestRemainingCredits:
+    def test_key_level_limit(self):
+        assert su.remaining_credits({"used": 174, "limit": 1000}) == 826
+
+    def test_plan_limit_fallback(self):
+        usage = {"used": 66, "limit": None, "plan_usage": 66, "plan_limit": 1000}
+        assert su.remaining_credits(usage) == 934
+
+    def test_unknown_limit_returns_none(self):
+        assert su.remaining_credits({"used": 5, "limit": None}) is None
+        assert su.remaining_credits(None) is None
+
+    def test_exhausted_returns_zero(self):
+        assert su.remaining_credits({"used": 1000, "limit": 1000}) == 0
+        assert su.remaining_credits({"used": 1200, "limit": 1000}) == 0
+
+
+class TestSelectTavilyKeyOrder:
+    def test_exhausted_keys_move_last(self):
+        usage = {
+            "b": {"used": 1000, "limit": 1000},
+            "c": None,
+        }
+        assert su.select_tavily_key_order(["a", "b", "c"], usage) == ["a", "c", "b"]
+
+    def test_blank_keys_skipped(self):
+        assert su.select_tavily_key_order(["a", " ", ""], {}) == ["a"]
+
+    def test_all_unknown_keeps_order(self):
+        assert su.select_tavily_key_order(["a", "b"], {}) == ["a", "b"]
+
+
+class TestFetchTavilyUsageMany:
+    def setup_method(self):
+        su.clear_tavily_usage_cache()
+
+    def test_parallel_fetch_dedupes_and_caches(self):
+        calls = []
+
+        def fake_fetch(key, timeout_seconds=8.0):
+            calls.append(key)
+            return {"used": 1, "limit": 1000}
+
+        with mock.patch.object(su, "fetch_tavily_usage", side_effect=fake_fetch):
+            first = su.fetch_tavily_usage_many(["k1", "k2", "k1"])
+            second = su.fetch_tavily_usage_many(["k1", "k2"])
+
+        assert set(first) == {"k1", "k2"}
+        assert first["k1"] == {"used": 1, "limit": 1000}
+        assert second == first
+        assert sorted(calls) == ["k1", "k2"]
+
+    def test_failures_are_cached(self):
+        with mock.patch.object(su, "fetch_tavily_usage", return_value=None) as mocked:
+            su.fetch_tavily_usage_many(["k1"])
+            su.fetch_tavily_usage_many(["k1"])
+        assert mocked.call_count == 1
+
+    def test_empty_keys(self):
+        assert su.fetch_tavily_usage_many([]) == {}
+        assert su.fetch_tavily_usage_many(None) == {}
